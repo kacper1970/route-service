@@ -10,33 +10,30 @@ import requests
 import base64
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
-
-# Pozwól na połączenia HTTP zamiast HTTPS (tylko na potrzeby testowe)
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 app = Flask(__name__)
 CORS(app)
 
-# Token z Base64
+# Zmienne 
 token_b64 = os.getenv("GOOGLE_TOKEN_B64")
 calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
 
-# JustSend konfiguracja
 JUSTSEND_URL = "https://justsend.io/api/sender/singlemessage/send"
 APP_KEY = os.getenv("JS_APP_KEY")
 SENDER = os.getenv("JS_SENDER", "WEB")
 VARIANT = os.getenv("JS_VARIANT", "PRO")
 
-# Dane do logowania do e-maila
 EMAIL_LOGIN = os.getenv("EMAIL_LOGIN")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECIPIENT")
+EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 
-# Numery pracowników
 EMPLOYEE_1 = os.getenv("EMPLOYEE_1")
 EMPLOYEE_2 = os.getenv("EMPLOYEE_2")
 
-# Stała lokalizacja startowa/końcowa
 BASE_ADDRESS = "Królowej Elżbiety 1A, Świebodzice"
 
 @app.route("/")
@@ -55,32 +52,30 @@ def get_calendar_service():
 def get_events_for_today():
     service = get_calendar_service()
     now = datetime.datetime.utcnow()
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + 'Z'
-    end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat() + 'Z'
-
-    events_result = service.events().list(
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + 'Z'
+    end = now.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat() + 'Z'
+    events = service.events().list(
         calendarId=calendar_id,
-        timeMin=start_of_day,
-        timeMax=end_of_day,
+        timeMin=start,
+        timeMax=end,
         singleEvents=True,
         orderBy='startTime'
-    ).execute()
-    return events_result.get('items', [])
+    ).execute().get('items', [])
+    return events
 
 def generate_maps_link(addresses):
-    base_url = "https://www.google.com/maps/dir/"
     waypoints = "/".join([addr.replace(" ", "+") for addr in addresses])
-    return base_url + waypoints
+    return f"https://www.google.com/maps/dir/{waypoints}"
 
 def generate_pdf(events, filepath):
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
+    font_path = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
+    pdfmetrics.registerFont(TTFont("DejaVuSans", font_path))
 
     c = canvas.Canvas(filepath, pagesize=A4)
     width, height = A4
     y = height - 50
 
-    c.setFont("Helvetica-Bold", 16)
+    c.setFont("DejaVuSans", 16)
     c.drawString(50, y, "🗓️ Plan dnia – ENERTIA")
     y -= 40
 
@@ -90,10 +85,10 @@ def generate_pdf(events, filepath):
         start = event.get("start", {}).get("dateTime", "")
         start_time = start[11:16] if start else ""
 
-        c.setFont("Helvetica-Bold", 12)
+        c.setFont("DejaVuSans", 12)
         c.drawString(50, y, f"{start_time} – {summary}")
         y -= 20
-        c.setFont("Helvetica", 10)
+        c.setFont("DejaVuSans", 10)
         c.drawString(60, y, f"📍 {location}")
         y -= 30
 
@@ -136,7 +131,8 @@ Status wysyłki SMS:
 
     with open(pdf_path, 'rb') as f:
         file_data = f.read()
-        msg.add_attachment(file_data, maintype='application', subtype='pdf', filename='plan_dnia.pdf')
+        filename = f"plan_dnia_{datetime.datetime.now().strftime('%Y-%m-%d')}.pdf"
+        msg.add_attachment(file_data, maintype='application', subtype='pdf', filename=filename)
 
     with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
         smtp.starttls()
