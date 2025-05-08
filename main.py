@@ -22,16 +22,17 @@ CORS(app)
 # Zmienne środowiskowe
 token_b64 = os.getenv("GOOGLE_TOKEN_B64")
 calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
-JUSTSEND_URL = "https://justsend.io/api/sender/singlemessage/send"
-APP_KEY = os.getenv("JS_APP_KEY")
-SENDER = os.getenv("JS_SENDER", "WEB")
-VARIANT = os.getenv("JS_VARIANT", "PRO")
 EMAIL_LOGIN = os.getenv("EMAIL_LOGIN")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+APP_KEY = os.getenv("JS_APP_KEY")
+SENDER = os.getenv("JS_SENDER", "WEB")
+VARIANT = os.getenv("JS_VARIANT", "PRO")
 EMPLOYEE_1 = os.getenv("EMPLOYEE_1")
 EMPLOYEE_2 = os.getenv("EMPLOYEE_2")
+
 BASE_ADDRESS = "Królowej Elżbiety 1A, Świebodzice"
+JUSTSEND_URL = "https://justsend.io/api/sender/singlemessage/send"
 
 @app.route("/")
 def home():
@@ -63,28 +64,16 @@ def get_events_for_today():
 def generate_maps_link(addresses):
     waypoints = "/".join([addr.replace(" ", "+") for addr in addresses])
     response = requests.get(f"https://tinyurl.com/api-create.php?url=https://www.google.com/maps/dir/{waypoints}")
-    return response.text if response.ok else f"https://www.google.com/maps/dir/{waypoints}"
+    return response.text if response.status_code == 200 else f"https://www.google.com/maps/dir/{waypoints}"
 
-def parse_event_description(description):
-    phone = address = problem = urgency = ""
-    if description:
-        for line in description.splitlines():
-            if "Telefon:" in line:
-                phone = line.split("Telefon:")[1].strip()
-            if "Adres:" in line:
-                address = line.split("Adres:")[1].strip()
-            if "Problem:" in line:
-                problem = line.split("Problem:")[1].strip()
-            if "Typ wizyty:" in line:
-                urgency = line.split("Typ wizyty:")[1].strip()
-    return phone, address, problem, urgency
-
-def urgency_color(urgency):
-    return {
-        "🟢": colors.green,
-        "🟠": colors.orange,
-        "🔴": colors.red
-    }.get(urgency[:2], colors.black)
+def urgency_to_color(urgency):
+    if urgency == "standard":
+        return colors.green
+    elif urgency == "urgent":
+        return colors.orange
+    elif urgency == "now":
+        return colors.red
+    return colors.black
 
 def generate_pdf(events, filepath):
     font_path = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
@@ -100,39 +89,37 @@ def generate_pdf(events, filepath):
 
     for event in events:
         summary = event.get("summary", "")
-        description = event.get("description", "")
+        location = event.get("location", "")
         start = event.get("start", {}).get("dateTime", "")
         start_time = start[11:16] if start else ""
-        phone, address, problem, urgency = parse_event_description(description)
 
-        # Pasek koloru pilności
-        bar_color = urgency_color(urgency)
-        c.setFillColor(bar_color)
-        c.rect(40, y - 5, 5, 40, fill=1, stroke=0)
-        c.setFillColor(colors.black)
+        urgency = "standard"
+        if "🔥" in summary:
+            urgency = "now"
+        elif "⚠️" in summary:
+            urgency = "urgent"
 
-        # Treść wpisu
+        color = urgency_to_color(urgency)
+        c.setFillColor(color)
+        c.rect(40, y - 5, 5, 45, fill=True, stroke=False)
+
+        c.setFont("DejaVuSans", 10)
+        c.drawString(50, y + 20, f"Typ wizyty: {urgency.upper()}")
+
         c.setFont("DejaVuSans", 12)
+        c.setFillColor(colors.black)
         c.drawString(50, y, f"{start_time} – {summary}")
         y -= 20
+
         c.setFont("DejaVuSans", 10)
-
-        if address:
-            c.drawString(60, y, f"📍 {address}")
+        if location:
+            c.drawString(60, y, f"📍 {location}")
         else:
             c.setFillColor(colors.red)
-            c.drawString(60, y, f"⚠️ Brak adresu – skontaktuj się z klientem")
+            c.drawString(60, y, "❌ Brak lokalizacji – skontaktuj się z klientem")
             c.setFillColor(colors.black)
-        y -= 15
-
-        if phone:
-            c.drawString(60, y, f"📞 {phone}")
-        else:
-            c.setFillColor(colors.red)
-            c.drawString(60, y, f"⚠️ Brak numeru telefonu")
-            c.setFillColor(colors.black)
-
         y -= 30
+
         if y < 100:
             c.showPage()
             y = height - 50
@@ -189,13 +176,12 @@ def generate_route():
 
         addresses = [BASE_ADDRESS]
         for event in events:
-            loc = event.get("location")
-            if loc:
-                addresses.append(loc)
+            location = event.get("location")
+            if location:
+                addresses.append(location)
         addresses.append(BASE_ADDRESS)
 
         maps_link = generate_maps_link(addresses)
-
         pdf_path = "/tmp/plan_dnia.pdf"
         generate_pdf(events, pdf_path)
 
