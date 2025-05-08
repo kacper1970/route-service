@@ -1,3 +1,5 @@
+# route-service/main.py
+
 import os
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 import pickle
@@ -15,34 +17,29 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib import colors
-from urllib.parse import quote_plus
 
 app = Flask(__name__)
 CORS(app)
 
-# Zmienne
+# Zmienne środowiskowe
 token_b64 = os.getenv("GOOGLE_TOKEN_B64")
 calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
-
+EMAIL_LOGIN = os.getenv("EMAIL_LOGIN")
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+EMPLOYEE_1 = os.getenv("EMPLOYEE_1")
+EMPLOYEE_2 = os.getenv("EMPLOYEE_2")
 JUSTSEND_URL = "https://justsend.io/api/sender/singlemessage/send"
 APP_KEY = os.getenv("JS_APP_KEY")
 SENDER = os.getenv("JS_SENDER", "WEB")
 VARIANT = os.getenv("JS_VARIANT", "PRO")
-
-EMAIL_LOGIN = os.getenv("EMAIL_LOGIN")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-
-EMPLOYEE_1 = os.getenv("EMPLOYEE_1")
-EMPLOYEE_2 = os.getenv("EMPLOYEE_2")
-
 BASE_ADDRESS = "Królowej Elżbiety 1A, Świebodzice"
 
-COLORS = {
+# Kolory pilności
+URGENCY_COLORS = {
     "standard": colors.green,
     "urgent": colors.orange,
-    "now": colors.red,
-    "brak": colors.red
+    "now": colors.red
 }
 
 @app.route("/")
@@ -63,26 +60,26 @@ def get_events_for_today():
     now = datetime.datetime.utcnow()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + 'Z'
     end = now.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat() + 'Z'
-    events = service.events().list(
+    return service.events().list(
         calendarId=calendar_id,
         timeMin=start,
         timeMax=end,
         singleEvents=True,
         orderBy='startTime'
     ).execute().get('items', [])
-    return events
 
 def generate_maps_link(addresses):
-    base_url = "https://www.google.com/maps/dir/"
-    joined = "/".join([quote_plus(addr) for addr in addresses])
-    full_url = base_url + joined
-    tiny = requests.get(f"https://tinyurl.com/api-create.php?url={full_url}")
-    return tiny.text if tiny.status_code == 200 else full_url
+    waypoints = "/".join([addr.replace(" ", "+") for addr in addresses])
+    full_url = f"https://www.google.com/maps/dir/{waypoints}"
+    try:
+        r = requests.get(f"https://tinyurl.com/api-create.php?url={full_url}")
+        return r.text if r.status_code == 200 else full_url
+    except Exception:
+        return full_url
 
 def generate_pdf(events, filepath):
     font_path = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
     pdfmetrics.registerFont(TTFont("DejaVuSans", font_path))
-
     c = canvas.Canvas(filepath, pagesize=A4)
     width, height = A4
     y = height - 50
@@ -94,47 +91,59 @@ def generate_pdf(events, filepath):
     for event in events:
         summary = event.get("summary", "")
         location = event.get("location", "")
-        start = event.get("start", {}).get("dateTime", "")
-        start_time = start[11:16] if start else "Brak czasu"
-        description = event.get("description", "")
+        start_time = event.get("start", {}).get("dateTime", "")[11:16]
+        urgency = "standard"
+        phone = "Brak numeru"
 
-        phone = "Brak"
-        urgency = "brak"
-        for line in description.splitlines():
-            if "Telefon:" in line:
-                phone = line.replace("📞 Telefon:", "").strip()
-            if "Typ wizyty:" in line:
-                urgency = line.replace("⏱️ Typ wizyty:", "").strip().split()[0]
+        if "🔥" in summary:
+            urgency = "now"
+        elif "⚠️" in summary:
+            urgency = "urgent"
 
-        color = COLORS.get(urgency, colors.gray)
+        if "📞" in event.get("description", ""):
+            for line in event["description"].splitlines():
+                if "📞" in line:
+                    phone = line.replace("📞 Telefon:", "").strip()
 
-        c.setFont("DejaVuSans", 10)
-        c.setFillColor(color)
-        c.drawString(50, y, f"🕒 Typ wizyty: {urgency.upper()}")
+        # Kolor belki
+        urgency_color = URGENCY_COLORS.get(urgency, colors.black)
+
+        # Typ wizyty
+        urgency_label = {
+            "standard": "Wizyta standardowa",
+            "urgent": "Wizyta pilna",
+            "now": "Wizyta natychmiastowa"
+        }[urgency]
+
+        # Pasek koloru (poziomy pod nagłówkiem)
+        c.setFillColor(urgency_color)
+        c.rect(45, y - 5, width - 90, 5, fill=1)
         y -= 15
 
+        # Typ wizyty (tekst)
+        c.setFont("DejaVuSans", 10)
+        c.setFillColor(urgency_color)
+        c.drawString(50, y, urgency_label)
+        y -= 15
+
+        # Szczegóły
         c.setFillColor(colors.black)
         c.setFont("DejaVuSans", 12)
         c.drawString(50, y, f"{start_time} – {summary}")
         y -= 20
 
         c.setFont("DejaVuSans", 10)
-        if not location:
+        if not location or "Brak" in location:
             c.setFillColor(colors.red)
         c.drawString(60, y, f"📍 {location or 'Brak lokalizacji'}")
-        c.setFillColor(colors.black)
         y -= 15
 
-        if not phone or phone.lower() == "brak":
+        if not phone or "Brak" in phone:
             c.setFillColor(colors.red)
+        else:
+            c.setFillColor(colors.black)
         c.drawString(60, y, f"📞 {phone}")
-        c.setFillColor(colors.black)
         y -= 30
-
-        c.setFillColor(color)
-        c.rect(45, y + 5, width - 90, 3, fill=1, stroke=0)
-        c.setFillColor(colors.black)
-        y -= 20
 
         if y < 100:
             c.showPage()
@@ -165,14 +174,12 @@ def send_email_with_pdf(recipient, pdf_path, maps_link, sms_status):
     msg['Subject'] = '📍 Plan dnia – ENERTIA'
     msg['From'] = 'noreply@enertia.local'
     msg['To'] = recipient
-    msg.set_content(f"""
-Załączony plan dnia w PDF oraz link do trasy:
+    msg.set_content(f"""Załączony plan dnia w PDF oraz link do trasy:
 {maps_link}
 
 Status wysyłki SMS:
 {sms_status}
-    """)
-
+""")
     with open(pdf_path, 'rb') as f:
         file_data = f.read()
         filename = f"plan_dnia_{datetime.datetime.now().strftime('%Y-%m-%d')}.pdf"
@@ -192,25 +199,23 @@ def generate_route():
 
         addresses = [BASE_ADDRESS]
         for event in events:
-            location = event.get("location")
-            if location:
-                addresses.append(location)
+            loc = event.get("location")
+            if loc: addresses.append(loc)
         addresses.append(BASE_ADDRESS)
 
         maps_link = generate_maps_link(addresses)
-
         pdf_path = "/tmp/plan_dnia.pdf"
         generate_pdf(events, pdf_path)
 
-        sms_content = "🛠️ Plan dnia ENERTIA:\n"
+        sms_text = "🛠️ Plan dnia ENERTIA:\n"
         for e in events:
             summary = e.get("summary", "")
-            location = e.get("location", "")
-            time = e.get("start", {}).get("dateTime", "")[11:16]
-            sms_content += f"{time} – {summary} ({location})\n"
-        sms_content += f"📍 Trasa: {maps_link}"
+            loc = e.get("location", "")
+            hour = e.get("start", {}).get("dateTime", "")[11:16]
+            sms_text += f"{hour} – {summary} ({loc})\n"
+        sms_text += f"📍 Trasa: {maps_link}"
 
-        sms_status = send_sms_to_employees(sms_content)
+        sms_status = send_sms_to_employees(sms_text)
         send_email_with_pdf(EMAIL_RECEIVER, pdf_path, maps_link, sms_status)
 
         return jsonify({"status": "Wysłano SMS i e-mail", "maps_link": maps_link})
