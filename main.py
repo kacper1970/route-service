@@ -67,6 +67,16 @@ def generate_maps_link(addresses):
     waypoints = "/".join([addr.replace(" ", "+") for addr in addresses])
     return f"https://www.google.com/maps/dir/{waypoints}"
 
+def shorten_url(long_url):
+    try:
+        res = requests.get(f"https://tinyurl.com/api-create.php?url={long_url}")
+        if res.status_code == 200:
+            return res.text
+        else:
+            return long_url
+    except:
+        return long_url
+
 def generate_pdf(events, filepath):
     font_path = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
     pdfmetrics.registerFont(TTFont("DejaVuSans", font_path))
@@ -76,7 +86,7 @@ def generate_pdf(events, filepath):
     y = height - 50
 
     c.setFont("DejaVuSans", 16)
-    c.drawString(50, y, "🗓️ Plan dnia – ENERTIA")
+    c.drawString(50, y, "Plan dnia – ENERTIA")
     y -= 40
 
     for event in events:
@@ -89,7 +99,7 @@ def generate_pdf(events, filepath):
         c.drawString(50, y, f"{start_time} – {summary}")
         y -= 20
         c.setFont("DejaVuSans", 10)
-        c.drawString(60, y, f"📍 {location}")
+        c.drawString(60, y, f"Adres: {location}")
         y -= 30
 
         if y < 100:
@@ -118,7 +128,7 @@ def send_sms_to_employees(message):
 
 def send_email_with_pdf(recipient, pdf_path, maps_link, sms_status):
     msg = EmailMessage()
-    msg['Subject'] = '📍 Plan dnia – ENERTIA'
+    msg['Subject'] = 'Plan dnia – ENERTIA'
     msg['From'] = 'noreply@enertia.local'
     msg['To'] = recipient
     msg.set_content(f"""
@@ -153,18 +163,19 @@ def generate_route():
                 addresses.append(location)
         addresses.append(BASE_ADDRESS)
 
-        maps_link = generate_maps_link(addresses)
+        long_link = generate_maps_link(addresses)
+        maps_link = shorten_url(long_link)
 
         pdf_path = "/tmp/plan_dnia.pdf"
         generate_pdf(events, pdf_path)
 
-        sms_content = "🛠️ Plan dnia ENERTIA:\n"
+        sms_content = "Plan dnia ENERTIA:\n"
         for e in events:
             summary = e.get("summary", "")
             location = e.get("location", "")
             time = e.get("start", {}).get("dateTime", "")[11:16]
             sms_content += f"{time} – {summary} ({location})\n"
-        sms_content += f"📍 Trasa: {maps_link}"
+        sms_content += f"Trasa: {maps_link}"
 
         sms_status = send_sms_to_employees(sms_content)
         send_email_with_pdf(EMAIL_RECEIVER, pdf_path, maps_link, sms_status)
