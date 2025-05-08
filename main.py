@@ -14,12 +14,11 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib import colors
+from reportlab.lib.colors import HexColor
 
 app = Flask(__name__)
 CORS(app)
 
-# Zmienne
 token_b64 = os.getenv("GOOGLE_TOKEN_B64")
 calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
 
@@ -36,6 +35,12 @@ EMPLOYEE_1 = os.getenv("EMPLOYEE_1")
 EMPLOYEE_2 = os.getenv("EMPLOYEE_2")
 
 BASE_ADDRESS = "Królowej Elżbiety 1A, Świebodzice"
+
+COLORS = {
+    "standard": HexColor("#4CAF50"),  # Zielony
+    "urgent": HexColor("#FF9800"),    # Pomarańczowy
+    "now": HexColor("#F44336")        # Czerwony
+}
 
 @app.route("/")
 def home():
@@ -66,76 +71,78 @@ def get_events_for_today():
 
 def generate_maps_link(addresses):
     waypoints = "/".join([addr.replace(" ", "+") for addr in addresses])
-    return f"https://www.google.com/maps/dir/{waypoints}"
+    full_url = f"https://www.google.com/maps/dir/{waypoints}"
+    response = requests.get(f"https://tinyurl.com/api-create.php?url={full_url}")
+    return response.text.strip() if response.ok else full_url
 
-def extract_field(description, prefix):
-    for line in description.splitlines():
-        if line.strip().startswith(prefix):
-            return line.replace(prefix, '').strip()
-    return None
-
-def extract_urgency(description):
-    urgency_line = extract_field(description, "⏱️ Typ wizyty:")
-    if urgency_line:
-        if "standard" in urgency_line:
-            return "standard"
-        elif "urgent" in urgency_line:
-            return "urgent"
-        elif "now" in urgency_line:
-            return "now"
+def parse_urgency_from_summary(summary):
+    summary = summary.lower()
+    if "now" in summary:
+        return "now"
+    elif "piln" in summary or "urgent" in summary:
+        return "urgent"
     return "standard"
 
 def generate_pdf(events, filepath):
     font_path = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
     pdfmetrics.registerFont(TTFont("DejaVuSans", font_path))
+
     c = canvas.Canvas(filepath, pagesize=A4)
     width, height = A4
     y = height - 50
-
-    urgency_colors = {
-        "standard": colors.green,
-        "urgent": colors.orange,
-        "now": colors.red
-    }
 
     c.setFont("DejaVuSans", 16)
     c.drawString(50, y, "🗓️ Plan dnia – ENERTIA")
     y -= 40
 
     for event in events:
-        summary = event.get("summary", "")
-        location = event.get("location", "Brak lokalizacji")
+        summary = event.get("summary", "Brak opisu")
+        location = event.get("location", "")
         start = event.get("start", {}).get("dateTime", "")
-        start_time = start[11:16] if start else ""
-
+        start_time = start[11:16] if start else "??:??"
         description = event.get("description", "")
-        phone = extract_field(description, "📞 Telefon:") or "Brak telefonu"
-        problem = extract_field(description, "🛠️ Problem:") or "Brak opisu problemu"
-        adres_opis = extract_field(description, "📍 Adres:") or "Brak adresu"
-        urgency = extract_urgency(description)
-        color = urgency_colors.get(urgency, colors.black)
+        urgency = parse_urgency_from_summary(summary)
+
+        color = COLORS.get(urgency, HexColor("#000000"))
+
+        # Belka
+        c.setFillColor(color)
+        c.rect(40, y - 5, 5, 60, fill=1, stroke=0)
 
         c.setFillColor(color)
-        c.rect(40, y - 5, 5, 65, fill=True, stroke=False)
         c.setFont("DejaVuSans", 10)
-        c.drawString(50, y, f"🕘 {start_time} – {summary}")
+        c.drawString(50, y, f"Typ wizyty: {urgency.upper()}")
         y -= 15
 
-        c.setFillColor(color)
-        c.drawString(50, y, f"⏱️ Typ wizyty: {urgency.upper()}")
-        y -= 15
+        c.setFillColor(HexColor("#000000"))
+        c.setFont("DejaVuSans", 12)
+        c.drawString(50, y, f"{start_time} – {summary}")
+        y -= 18
 
-        c.setFillColor(colors.red if "Brak" in phone else colors.black)
-        c.drawString(50, y, f"📞 Telefon: {phone}")
-        y -= 15
+        phone_line = next((l for l in description.splitlines() if "Telefon:" in l), "")
+        address_line = location if location else "Brak adresu"
+        problem_line = next((l for l in description.splitlines() if "Problem:" in l), "")
 
-        c.setFillColor(colors.red if "Brak" in adres_opis else colors.black)
-        c.drawString(50, y, f"📍 Adres: {adres_opis}")
-        y -= 15
+        c.setFont("DejaVuSans", 10)
 
-        c.setFillColor(colors.black)
-        c.drawString(50, y, f"🛠️ Problem: {problem}")
-        y -= 30
+        if "Brak" in address_line or address_line.strip() == "":
+            c.setFillColor(COLORS["now"])
+        else:
+            c.setFillColor(HexColor("#000000"))
+        c.drawString(60, y, f"📍 Adres: {address_line}")
+        y -= 14
+
+        if phone_line:
+            c.setFillColor(HexColor("#000000"))
+            c.drawString(60, y, f"📞 {phone_line}")
+            y -= 14
+
+        if problem_line:
+            c.setFillColor(HexColor("#000000"))
+            c.drawString(60, y, f"🛠️ {problem_line}")
+            y -= 20
+        else:
+            y -= 10
 
         if y < 100:
             c.showPage()
@@ -199,6 +206,7 @@ def generate_route():
         addresses.append(BASE_ADDRESS)
 
         maps_link = generate_maps_link(addresses)
+
         pdf_path = "/tmp/plan_dnia.pdf"
         generate_pdf(events, pdf_path)
 
