@@ -30,7 +30,7 @@ VARIANT = os.getenv("JS_VARIANT", "PRO")
 # Dane do logowania do e-maila
 EMAIL_LOGIN = os.getenv("EMAIL_LOGIN")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+EMAIL_RECEIVER = os.getenv("EMAIL_RECIPIENT")
 
 # Numery pracowników
 EMPLOYEE_1 = os.getenv("EMPLOYEE_1")
