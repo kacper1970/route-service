@@ -5,69 +5,24 @@ import pickle
 import smtplib
 from email.message import EmailMessage
 from flask import Flask, jsonify, request
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import Flow
 from flask_cors import CORS
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
+from googleapiclient.discovery import build
+import google.auth.transport.requests
 
-# Wymuszenie HTTPS OFF dla OAuth (do testów)
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+
+
 
 app = Flask(__name__)
 CORS(app)
 
-SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
-CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
-REDIRECT_URI = "https://route-service.onrender.com/oauth2callback"
-TOKEN_FILE = "token.pickle"
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+TOKEN_FILE = 'token.pickle'
+CALENDAR_ID = os.getenv("CALENDAR_ID")
+START_END_ADDRESS = "Królowej Elżbiety 1A, Świebodzice"
 
 @app.route("/")
 def index():
     return "✅ Route service is running"
-
-@app.route("/authorize")
-def authorize():
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-                "redirect_uris": [REDIRECT_URI],
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token"
-            }
-        },
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
-    )
-    auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-    return jsonify({"auth_url": auth_url})
-
-@app.route("/oauth2callback")
-def oauth2callback():
-    flow = Flow.from_client_config(
-        {
-            "web": {
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-                "redirect_uris": [REDIRECT_URI],
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token"
-            }
-        },
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
-    )
-    flow.fetch_token(authorization_response=request.url)
-    creds = flow.credentials
-
-    with open(TOKEN_FILE, 'wb') as token:
-        pickle.dump(creds, token)
-
-    return "✅ Token zapisany. Możesz korzystać z serwisu."
 
 def get_calendar_service():
     if not os.path.exists(TOKEN_FILE):
@@ -77,7 +32,7 @@ def get_calendar_service():
         creds = pickle.load(token)
 
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        creds.refresh(google.auth.transport.requests.Request())
         with open(TOKEN_FILE, 'wb') as token:
             pickle.dump(creds, token)
 
@@ -85,15 +40,14 @@ def get_calendar_service():
 
 def get_events_for_today():
     service = get_calendar_service()
-    calendar_id = os.environ.get("GOOGLE_CALENDAR_ID")
-
-    now = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0)
-    end = now + datetime.timedelta(days=1)
+    now = datetime.datetime.utcnow()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + 'Z'
+    end = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + 'Z'
 
     events_result = service.events().list(
-        calendarId=calendar_id,
-        timeMin=now.isoformat() + 'Z',
-        timeMax=end.isoformat() + 'Z',
+        calendarId=CALENDAR_ID,
+        timeMin=start,
+        timeMax=end,
         singleEvents=True,
         orderBy='startTime'
     ).execute()
@@ -101,55 +55,63 @@ def get_events_for_today():
     return events_result.get('items', [])
 
 def generate_maps_link(addresses):
-    base_url = "https://www.google.com/maps/dir/"
-    return base_url + "/".join([addr.replace(" ", "+") for addr in addresses])
+    base = "https://www.google.com/maps/dir/"
+    return base + "/".join([addr.replace(" ", "+") for addr in addresses])
 
-def generate_pdf(events):
-    pdf_path = "/tmp/plan_dnia.pdf"
-    c = canvas.Canvas(pdf_path, pagesize=A4)
-    width, height = A4
-    y = height - 50
+def generate_daily_pdf(events):
+    from fpdf import FPDF
 
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(50, y, "Plan dnia – ENERTIA")
-    y -= 30
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="Plan dnia – ENERTIA", ln=True, align='C')
+    pdf.ln(10)
 
     for event in events:
-        summary = event.get("summary", "Brak tytułu")
+        start = event['start'].get('dateTime', event['start'].get('date'))
         location = event.get("location", "Brak lokalizacji")
-        start = event.get("start", {}).get("dateTime", "")
-        start_time = start[11:16] if "T" in start else ""
+        summary = event.get("summary", "Brak opisu")
+        pdf.cell(200, 10, txt=f"{start} – {summary} – {location}", ln=True)
 
-        c.setFont("Helvetica", 12)
-        c.drawString(50, y, f"🕒 {start_time} – {summary} @ {location}")
-        y -= 20
-        if y < 100:
-            c.showPage()
-            y = height - 50
+    file_path = "/tmp/plan_dnia.pdf"
+    pdf.output(file_path)
+    return file_path
 
-    c.save()
-    return pdf_path
+def send_sms(phone, message):
+    import requests
 
-def send_sms_to_employees(events, maps_link):
-    # Tutaj możesz dodać logikę łączenia z JustSend
-    # np. wysyłanie listy zadań z linkiem do mapy
-    return "SMS wysłane (symulacja)"
+    JUSTSEND_URL = "https://justsend.io/api/sender/singlemessage/send"
+    payload = {
+        "sender": os.getenv("JS_SENDER", "ENERTIA"),
+        "msisdn": phone,
+        "bulkVariant": os.getenv("JS_VARIANT", "PRO"),
+        "content": message
+    }
+    headers = {
+        "App-Key": os.getenv("JS_APP_KEY"),
+        "Content-Type": "application/json"
+    }
+
+    response = requests.post(JUSTSEND_URL, json=payload, headers=headers)
+    return f"{phone}: {response.status_code}"
 
 def send_email_with_pdf(recipient, pdf_path, maps_link, sms_status):
     msg = EmailMessage()
     msg['Subject'] = '📍 Plan dnia – ENERTIA'
     msg['From'] = 'noreply@enertia.local'
     msg['To'] = recipient
-    msg.set_content(f"""Załączony plan dnia w PDF oraz link do trasy:
+    msg.set_content(f"""
+Załączony plan dnia w PDF oraz link do trasy:
 
 {maps_link}
 
 Status wysyłki SMS:
 {sms_status}
-""")
+    """)
 
     with open(pdf_path, 'rb') as f:
-        msg.add_attachment(f.read(), maintype='application', subtype='pdf', filename='plan_dnia.pdf')
+        file_data = f.read()
+        msg.add_attachment(file_data, maintype='application', subtype='pdf', filename='plan_dnia.pdf')
 
     with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
         smtp.starttls()
@@ -163,29 +125,35 @@ def generate_route():
         if not events:
             return jsonify({"message": "Brak wydarzeń na dziś."}), 200
 
-        addresses = ["Królowej Elżbiety 1A, Świebodzice"]
+        addresses = [START_END_ADDRESS]
         for event in events:
             location = event.get("location")
             if location:
                 addresses.append(location)
-        addresses.append("Królowej Elżbiety 1A, Świebodzice")
+        addresses.append(START_END_ADDRESS)
 
         maps_link = generate_maps_link(addresses)
-        pdf_path = generate_pdf(events)
-        sms_status = send_sms_to_employees(events, maps_link)
+        pdf_path = generate_daily_pdf(events)
 
-        send_email_with_pdf(
-            recipient=os.getenv("EMAIL_RECIPIENT"),
-            pdf_path=pdf_path,
-            maps_link=maps_link,
-            sms_status=sms_status
-        )
+        sms_message = f"🛠️ Plan dnia ENERTIA\n{datetime.datetime.now().strftime('%Y-%m-%d')}\n\nTrasa: {maps_link}"
+        sms_status = []
+
+        employee1 = os.getenv("EMPLOYEE1_PHONE")
+        employee2 = os.getenv("EMPLOYEE2_PHONE")
+
+        if employee1:
+            sms_status.append(send_sms(employee1, sms_message))
+        if employee2:
+            sms_status.append(send_sms(employee2, sms_message))
+
+        send_email_with_pdf(os.getenv("EMAIL_REPORT"), pdf_path, maps_link, "\n".join(sms_status))
 
         return jsonify({
             "status": "OK",
-            "map_link": maps_link,
-            "message": "Plan dnia został wysłany e-mailem oraz SMS-em."
+            "maps_link": maps_link,
+            "sms_status": sms_status
         })
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
