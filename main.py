@@ -15,6 +15,7 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib import colors
+import re
 
 app = Flask(__name__)
 CORS(app)
@@ -35,7 +36,7 @@ EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
 EMPLOYEE_1 = os.getenv("EMPLOYEE_1")
 EMPLOYEE_2 = os.getenv("EMPLOYEE_2")
 
-BASE_ADDRESS = "Krolowej Elzbiety 1A, Swiebodzice"
+BASE_ADDRESS = "Królowej Elżbiety 1A, Świebodzice"
 
 @app.route("/")
 def home():
@@ -66,15 +67,25 @@ def get_events_for_today():
 
 def generate_maps_link(addresses):
     waypoints = "/".join([addr.replace(" ", "+") for addr in addresses])
-    r = requests.get(f"https://tinyurl.com/api-create.php?url=https://www.google.com/maps/dir/{waypoints}")
-    return r.text
+    response = requests.get(f"https://tinyurl.com/api-create.php?url=https://www.google.com/maps/dir/{waypoints}")
+    return response.text
 
-def get_color_for_urgency(urgency):
-    if urgency == "urgent":
-        return colors.orange
-    elif urgency == "now":
-        return colors.red
-    return colors.green
+def extract_phone(description):
+    if not description:
+        return None
+    match = re.search(r'Tel: *(\+?\d+)', description)
+    if match:
+        return match.group(1)
+    return None
+
+def get_color_and_label(summary):
+    if summary.startswith("🟢"):
+        return colors.green, "STANDARD"
+    elif summary.startswith("🟠"):
+        return colors.orange, "PILNA"
+    elif summary.startswith("🔴"):
+        return colors.red, "NATYCHMIASTOWA"
+    return colors.gray, "NIEZNANA"
 
 def generate_pdf(events, filepath):
     font_path = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
@@ -90,39 +101,46 @@ def generate_pdf(events, filepath):
 
     for event in events:
         summary = event.get("summary", "")
-        location = event.get("location", "Brak lokalizacji")
-        phone = event.get("description", "").split("📞 Tel:")[-1].split("\n")[0].strip() if "📞 Tel:" in event.get("description", "") else "Brak telefonu"
-        urgency = "standard"
-        if summary.startswith("🟠"):
-            urgency = "urgent"
-        elif summary.startswith("🔴"):
-            urgency = "now"
+        location = event.get("location", "")
+        description = event.get("description", "")
+        start_time = event.get("start", {}).get("dateTime", "")[11:16]
+        phone = extract_phone(description)
 
-        color = get_color_for_urgency(urgency)
+        color, label = get_color_and_label(summary)
 
-        start = event.get("start", {}).get("dateTime", "")
-        start_time = start[11:16] if start else ""
-
-        c.setFillColor(color)
-        c.rect(40, y - 5, width - 80, 65, fill=1, stroke=0)
-
-        c.setFillColor(colors.white)
-        c.setFont("DejaVuSans", 12)
-        c.drawString(50, y + 45, f"Typ wizyty: {urgency.upper()}")
-        c.setFont("DejaVuSans", 14)
-        c.drawString(50, y + 25, f"{start_time} – {summary}")
+        # Typ wizyty
         c.setFont("DejaVuSans", 10)
+        c.setFillColor(color)
+        c.drawString(50, y, f"🔹 Typ wizyty: {label}")
+        y -= 10
 
-        address_color = colors.white if location and "Brak" not in location else colors.red
-        phone_color = colors.white if phone and "Brak" not in phone else colors.red
+        # Kolorowa pozioma belka
+        c.setFillColor(color)
+        c.rect(45, y - 2, 500, 4, fill=1, stroke=0)
+        y -= 10
 
-        c.setFillColor(address_color)
-        c.drawString(60, y + 10, f"📍 {location}")
+        # Treść zgłoszenia
+        c.setFont("DejaVuSans", 12)
+        c.setFillColor(colors.black)
+        c.drawString(50, y, f"{start_time} – {summary}")
+        y -= 20
 
-        c.setFillColor(phone_color)
-        c.drawString(60, y - 5, f"📞 {phone}")
+        c.setFont("DejaVuSans", 10)
+        if location:
+            c.drawString(60, y, f"📍 {location}")
+        else:
+            c.setFillColor(colors.red)
+            c.drawString(60, y, "❌ Brak lokalizacji")
+        y -= 15
 
-        y -= 90
+        if phone:
+            c.setFillColor(colors.black)
+            c.drawString(60, y, f"📞 {phone}")
+        else:
+            c.setFillColor(colors.red)
+            c.drawString(60, y, "❌ Brak telefonu")
+        y -= 30
+
         if y < 100:
             c.showPage()
             y = height - 50
@@ -179,9 +197,9 @@ def generate_route():
 
         addresses = [BASE_ADDRESS]
         for event in events:
-            location = event.get("location")
-            if location:
-                addresses.append(location)
+            loc = event.get("location")
+            if loc:
+                addresses.append(loc)
         addresses.append(BASE_ADDRESS)
 
         maps_link = generate_maps_link(addresses)
