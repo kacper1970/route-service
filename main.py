@@ -14,11 +14,13 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.colors import HexColor
+from reportlab.lib import colors
+from urllib.parse import quote_plus
 
 app = Flask(__name__)
 CORS(app)
 
+# Zmienne
 token_b64 = os.getenv("GOOGLE_TOKEN_B64")
 calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
 
@@ -37,9 +39,10 @@ EMPLOYEE_2 = os.getenv("EMPLOYEE_2")
 BASE_ADDRESS = "Królowej Elżbiety 1A, Świebodzice"
 
 COLORS = {
-    "standard": HexColor("#4CAF50"),  # Zielony
-    "urgent": HexColor("#FF9800"),    # Pomarańczowy
-    "now": HexColor("#F44336")        # Czerwony
+    "standard": colors.green,
+    "urgent": colors.orange,
+    "now": colors.red,
+    "brak": colors.red
 }
 
 @app.route("/")
@@ -70,18 +73,11 @@ def get_events_for_today():
     return events
 
 def generate_maps_link(addresses):
-    waypoints = "/".join([addr.replace(" ", "+") for addr in addresses])
-    full_url = f"https://www.google.com/maps/dir/{waypoints}"
-    response = requests.get(f"https://tinyurl.com/api-create.php?url={full_url}")
-    return response.text.strip() if response.ok else full_url
-
-def parse_urgency_from_summary(summary):
-    summary = summary.lower()
-    if "now" in summary:
-        return "now"
-    elif "piln" in summary or "urgent" in summary:
-        return "urgent"
-    return "standard"
+    base_url = "https://www.google.com/maps/dir/"
+    joined = "/".join([quote_plus(addr) for addr in addresses])
+    full_url = base_url + joined
+    tiny = requests.get(f"https://tinyurl.com/api-create.php?url={full_url}")
+    return tiny.text if tiny.status_code == 200 else full_url
 
 def generate_pdf(events, filepath):
     font_path = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
@@ -96,53 +92,49 @@ def generate_pdf(events, filepath):
     y -= 40
 
     for event in events:
-        summary = event.get("summary", "Brak opisu")
+        summary = event.get("summary", "")
         location = event.get("location", "")
         start = event.get("start", {}).get("dateTime", "")
-        start_time = start[11:16] if start else "??:??"
+        start_time = start[11:16] if start else "Brak czasu"
         description = event.get("description", "")
-        urgency = parse_urgency_from_summary(summary)
 
-        color = COLORS.get(urgency, HexColor("#000000"))
+        phone = "Brak"
+        urgency = "brak"
+        for line in description.splitlines():
+            if "Telefon:" in line:
+                phone = line.replace("📞 Telefon:", "").strip()
+            if "Typ wizyty:" in line:
+                urgency = line.replace("⏱️ Typ wizyty:", "").strip().split()[0]
 
-        # Belka
-        c.setFillColor(color)
-        c.rect(40, y - 5, 5, 60, fill=1, stroke=0)
+        color = COLORS.get(urgency, colors.gray)
 
-        c.setFillColor(color)
         c.setFont("DejaVuSans", 10)
-        c.drawString(50, y, f"Typ wizyty: {urgency.upper()}")
+        c.setFillColor(color)
+        c.drawString(50, y, f"🕒 Typ wizyty: {urgency.upper()}")
         y -= 15
 
-        c.setFillColor(HexColor("#000000"))
+        c.setFillColor(colors.black)
         c.setFont("DejaVuSans", 12)
         c.drawString(50, y, f"{start_time} – {summary}")
-        y -= 18
-
-        phone_line = next((l for l in description.splitlines() if "Telefon:" in l), "")
-        address_line = location if location else "Brak adresu"
-        problem_line = next((l for l in description.splitlines() if "Problem:" in l), "")
+        y -= 20
 
         c.setFont("DejaVuSans", 10)
+        if not location:
+            c.setFillColor(colors.red)
+        c.drawString(60, y, f"📍 {location or 'Brak lokalizacji'}")
+        c.setFillColor(colors.black)
+        y -= 15
 
-        if "Brak" in address_line or address_line.strip() == "":
-            c.setFillColor(COLORS["now"])
-        else:
-            c.setFillColor(HexColor("#000000"))
-        c.drawString(60, y, f"📍 Adres: {address_line}")
-        y -= 14
+        if not phone or phone.lower() == "brak":
+            c.setFillColor(colors.red)
+        c.drawString(60, y, f"📞 {phone}")
+        c.setFillColor(colors.black)
+        y -= 30
 
-        if phone_line:
-            c.setFillColor(HexColor("#000000"))
-            c.drawString(60, y, f"📞 {phone_line}")
-            y -= 14
-
-        if problem_line:
-            c.setFillColor(HexColor("#000000"))
-            c.drawString(60, y, f"🛠️ {problem_line}")
-            y -= 20
-        else:
-            y -= 10
+        c.setFillColor(color)
+        c.rect(45, y + 5, width - 90, 3, fill=1, stroke=0)
+        c.setFillColor(colors.black)
+        y -= 20
 
         if y < 100:
             c.showPage()
