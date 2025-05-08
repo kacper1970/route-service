@@ -8,6 +8,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import requests
 import base64
+import re
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from reportlab.lib.pagesizes import A4
@@ -15,12 +16,11 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib import colors
-import re
 
 app = Flask(__name__)
 CORS(app)
 
-# Zmienne
+# Zmienne 
 token_b64 = os.getenv("GOOGLE_TOKEN_B64")
 calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
 
@@ -67,25 +67,34 @@ def get_events_for_today():
 
 def generate_maps_link(addresses):
     waypoints = "/".join([addr.replace(" ", "+") for addr in addresses])
-    response = requests.get(f"https://tinyurl.com/api-create.php?url=https://www.google.com/maps/dir/{waypoints}")
-    return response.text
+    full_link = f"https://www.google.com/maps/dir/{waypoints}"
+    try:
+        r = requests.get("https://tinyurl.com/api-create.php", params={"url": full_link})
+        if r.status_code == 200:
+            return r.text
+    except:
+        pass
+    return full_link
 
-def extract_phone(description):
-    if not description:
-        return None
-    match = re.search(r'Tel: *(\+?\d+)', description)
-    if match:
-        return match.group(1)
-    return None
+def parse_description(desc):
+    phone = re.search(r'Telefon:\s*(.*)', desc)
+    address = re.search(r'Adres:\s*(.*)', desc)
+    problem = re.search(r'Problem:\s*(.*)', desc)
+    urgency = re.search(r'Typ wizyty:.*?\((.*?)\)', desc)
+    return {
+        "phone": phone.group(1).strip() if phone else None,
+        "address": address.group(1).strip() if address else None,
+        "problem": problem.group(1).strip() if problem else None,
+        "urgency": urgency.group(1).strip() if urgency else "standard"
+    }
 
-def get_color_and_label(summary):
-    if summary.startswith("🟢"):
-        return colors.green, "STANDARD"
-    elif summary.startswith("🟠"):
-        return colors.orange, "PILNA"
-    elif summary.startswith("🔴"):
-        return colors.red, "NATYCHMIASTOWA"
-    return colors.gray, "NIEZNANA"
+def urgency_style(urgency):
+    if urgency == "urgent":
+        return (colors.orange, "\ud83d\udfe0")  # ⚫ pomarańczowa
+    elif urgency == "now":
+        return (colors.red, "\ud83d\udd34")     # ⚫ czerwona
+    else:
+        return (colors.green, "\ud83d\udfe2")   # ⚫ zielona
 
 def generate_pdf(events, filepath):
     font_path = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
@@ -100,45 +109,55 @@ def generate_pdf(events, filepath):
     y -= 40
 
     for event in events:
-        summary = event.get("summary", "")
-        location = event.get("location", "")
-        description = event.get("description", "")
-        start_time = event.get("start", {}).get("dateTime", "")[11:16]
-        phone = extract_phone(description)
+        start = event.get("start", {}).get("dateTime", "")
+        time = start[11:16] if start else "Brak godziny"
+        summary = event.get("summary", "Brak tytułu")
+        location = event.get("location", "Brak lokalizacji")
+        desc = event.get("description", "")
+        data = parse_description(desc)
+        color, emoji = urgency_style(data["urgency"])
 
-        color, label = get_color_and_label(summary)
-
-        # Typ wizyty
-        c.setFont("DejaVuSans", 10)
+        # Typ wizyty + kolorowa belka pod spodem
         c.setFillColor(color)
-        c.drawString(50, y, f"🔹 Typ wizyty: {label}")
-        y -= 10
-
-        # Kolorowa pozioma belka
-        c.setFillColor(color)
-        c.rect(45, y - 2, 500, 4, fill=1, stroke=0)
-        y -= 10
-
-        # Treść zgłoszenia
-        c.setFont("DejaVuSans", 12)
-        c.setFillColor(colors.black)
-        c.drawString(50, y, f"{start_time} – {summary}")
-        y -= 20
-
         c.setFont("DejaVuSans", 10)
-        if location:
-            c.drawString(60, y, f"📍 {location}")
-        else:
-            c.setFillColor(colors.red)
-            c.drawString(60, y, "❌ Brak lokalizacji")
+        c.drawString(50, y, f"{emoji} Typ wizyty: {data['urgency'].upper()}")
+        y -= 5
+        c.setFillColor(color)
+        c.rect(45, y, width - 90, 3, stroke=0, fill=1)
         y -= 15
 
-        if phone:
-            c.setFillColor(colors.black)
-            c.drawString(60, y, f"📞 {phone}")
+        # Główne informacje
+        c.setFillColor(colors.black)
+        c.setFont("DejaVuSans", 12)
+        c.drawString(50, y, f"{time} – {summary}")
+        y -= 20
+
+        # Adres
+        c.setFont("DejaVuSans", 10)
+        if data["address"]:
+            c.drawString(60, y, f"📍 {data['address']}")
         else:
             c.setFillColor(colors.red)
-            c.drawString(60, y, "❌ Brak telefonu")
+            c.drawString(60, y, "📍 Brak adresu")
+            c.setFillColor(colors.black)
+        y -= 15
+
+        # Telefon
+        if data["phone"]:
+            c.drawString(60, y, f"📞 {data['phone']}")
+        else:
+            c.setFillColor(colors.red)
+            c.drawString(60, y, "📞 Brak numeru telefonu")
+            c.setFillColor(colors.black)
+        y -= 15
+
+        # Problem
+        if data["problem"]:
+            c.drawString(60, y, f"🛠️ {data['problem']}")
+        else:
+            c.setFillColor(colors.red)
+            c.drawString(60, y, "🛠️ Brak opisu problemu")
+            c.setFillColor(colors.black)
         y -= 30
 
         if y < 100:
