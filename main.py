@@ -8,7 +8,6 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import requests
 import base64
-import re
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from reportlab.lib.pagesizes import A4
@@ -20,7 +19,7 @@ from reportlab.lib import colors
 app = Flask(__name__)
 CORS(app)
 
-# Zmienne 
+# Zmienne środowiskowe
 token_b64 = os.getenv("GOOGLE_TOKEN_B64")
 calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
 
@@ -37,6 +36,7 @@ EMPLOYEE_1 = os.getenv("EMPLOYEE_1")
 EMPLOYEE_2 = os.getenv("EMPLOYEE_2")
 
 BASE_ADDRESS = "Królowej Elżbiety 1A, Świebodzice"
+FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
 
 @app.route("/")
 def home():
@@ -67,39 +67,19 @@ def get_events_for_today():
 
 def generate_maps_link(addresses):
     waypoints = "/".join([addr.replace(" ", "+") for addr in addresses])
-    full_link = f"https://www.google.com/maps/dir/{waypoints}"
-    try:
-        r = requests.get("https://tinyurl.com/api-create.php", params={"url": full_link})
-        if r.status_code == 200:
-            return r.text
-    except:
-        pass
-    return full_link
+    response = requests.get(f"http://tinyurl.com/api-create.php?url=https://www.google.com/maps/dir/{waypoints}")
+    return response.text if response.status_code == 200 else f"https://www.google.com/maps/dir/{waypoints}"
 
-def parse_description(desc):
-    phone = re.search(r'Telefon:\s*(.*)', desc)
-    address = re.search(r'Adres:\s*(.*)', desc)
-    problem = re.search(r'Problem:\s*(.*)', desc)
-    urgency = re.search(r'Typ wizyty:.*?\((.*?)\)', desc)
-    return {
-        "phone": phone.group(1).strip() if phone else None,
-        "address": address.group(1).strip() if address else None,
-        "problem": problem.group(1).strip() if problem else None,
-        "urgency": urgency.group(1).strip() if urgency else "standard"
-    }
-
-def urgency_style(urgency):
-    if urgency == "urgent":
-        return (colors.orange, "\ud83d\udfe0")  # ⚫ pomarańczowa
-    elif urgency == "now":
-        return (colors.red, "\ud83d\udd34")     # ⚫ czerwona
-    else:
-        return (colors.green, "\ud83d\udfe2")   # ⚫ zielona
+def get_event_color_and_label(urgency):
+    urgency = urgency.lower()
+    if "pilna" in urgency or "urgent" in urgency:
+        return colors.orange, "Pilna wizyta"
+    elif "natychmiastowa" in urgency or "now" in urgency:
+        return colors.red, "Wizyta natychmiastowa"
+    return colors.green, "Standardowa wizyta"
 
 def generate_pdf(events, filepath):
-    font_path = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
-    pdfmetrics.registerFont(TTFont("DejaVuSans", font_path))
-
+    pdfmetrics.registerFont(TTFont("DejaVuSans", FONT_PATH))
     c = canvas.Canvas(filepath, pagesize=A4)
     width, height = A4
     y = height - 50
@@ -109,55 +89,46 @@ def generate_pdf(events, filepath):
     y -= 40
 
     for event in events:
+        summary = event.get("summary", "")
+        location = event.get("location", "")
         start = event.get("start", {}).get("dateTime", "")
-        time = start[11:16] if start else "Brak godziny"
-        summary = event.get("summary", "Brak tytułu")
-        location = event.get("location", "Brak lokalizacji")
-        desc = event.get("description", "")
-        data = parse_description(desc)
-        color, emoji = urgency_style(data["urgency"])
+        start_time = start[11:16] if start else "??:??"
 
-        # Typ wizyty + kolorowa belka pod spodem
-        c.setFillColor(color)
-        c.setFont("DejaVuSans", 10)
-        c.drawString(50, y, f"{emoji} Typ wizyty: {data['urgency'].upper()}")
-        y -= 5
-        c.setFillColor(color)
-        c.rect(45, y, width - 90, 3, stroke=0, fill=1)
-        y -= 15
+        phone = "Brak telefonu"
+        address = location if location else "Brak adresu"
+        urgency = summary.split(" ")[0].strip("🔴🟠🟢")
+        color, urgency_label = get_event_color_and_label(urgency)
 
-        # Główne informacje
+        # Etykieta pilności
+        c.setFillColor(color)
+        c.setFont("DejaVuSans", 12)
+        c.drawString(50, y, urgency_label)
+        y -= 6
+        c.setFillColor(color)
+        c.rect(50, y, 500, 3, fill=1, stroke=0)
+        y -= 14
+
+        # Zgłoszenie
         c.setFillColor(colors.black)
         c.setFont("DejaVuSans", 12)
-        c.drawString(50, y, f"{time} – {summary}")
+        c.drawString(50, y, f"{start_time} – {summary}")
         y -= 20
 
-        # Adres
         c.setFont("DejaVuSans", 10)
-        if data["address"]:
-            c.drawString(60, y, f"📍 {data['address']}")
-        else:
+        if "Brak adresu" in address:
             c.setFillColor(colors.red)
-            c.drawString(60, y, "📍 Brak adresu")
-            c.setFillColor(colors.black)
+        c.drawString(60, y, f"📍 {address}")
+        c.setFillColor(colors.black)
         y -= 15
 
-        # Telefon
-        if data["phone"]:
-            c.drawString(60, y, f"📞 {data['phone']}")
-        else:
+        description = event.get("description", "")
+        for line in description.splitlines():
+            if "Telefon:" in line:
+                phone = line.split("Telefon:")[1].strip()
+        if "Brak" in phone:
             c.setFillColor(colors.red)
-            c.drawString(60, y, "📞 Brak numeru telefonu")
-            c.setFillColor(colors.black)
-        y -= 15
-
-        # Problem
-        if data["problem"]:
-            c.drawString(60, y, f"🛠️ {data['problem']}")
-        else:
-            c.setFillColor(colors.red)
-            c.drawString(60, y, "🛠️ Brak opisu problemu")
-            c.setFillColor(colors.black)
+        c.drawString(60, y, f"📞 {phone}")
+        c.setFillColor(colors.black)
         y -= 30
 
         if y < 100:
@@ -195,7 +166,7 @@ Załączony plan dnia w PDF oraz link do trasy:
 
 Status wysyłki SMS:
 {sms_status}
-    """)
+""")
 
     with open(pdf_path, 'rb') as f:
         file_data = f.read()
@@ -216,9 +187,9 @@ def generate_route():
 
         addresses = [BASE_ADDRESS]
         for event in events:
-            loc = event.get("location")
-            if loc:
-                addresses.append(loc)
+            location = event.get("location")
+            if location:
+                addresses.append(location)
         addresses.append(BASE_ADDRESS)
 
         maps_link = generate_maps_link(addresses)
