@@ -3,11 +3,11 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 import pickle
 import datetime
 import smtplib
+import requests
+import base64
 from email.message import EmailMessage
 from flask import Flask, jsonify
 from flask_cors import CORS
-import requests
-import base64
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 from reportlab.lib.pagesizes import A4
@@ -19,24 +19,22 @@ from reportlab.lib import colors
 app = Flask(__name__)
 CORS(app)
 
+# Ścieżka do czcionki
+FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
+pdfmetrics.registerFont(TTFont("DejaVuSans", FONT_PATH))
+
 # Zmienne środowiskowe
 token_b64 = os.getenv("GOOGLE_TOKEN_B64")
 calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
-
-JUSTSEND_URL = "https://justsend.io/api/sender/singlemessage/send"
 APP_KEY = os.getenv("JS_APP_KEY")
 SENDER = os.getenv("JS_SENDER", "WEB")
 VARIANT = os.getenv("JS_VARIANT", "PRO")
-
 EMAIL_LOGIN = os.getenv("EMAIL_LOGIN")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-
 EMPLOYEE_1 = os.getenv("EMPLOYEE_1")
 EMPLOYEE_2 = os.getenv("EMPLOYEE_2")
-
 BASE_ADDRESS = "Królowej Elżbiety 1A, Świebodzice"
-FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf")
 
 @app.route("/")
 def home():
@@ -56,31 +54,40 @@ def get_events_for_today():
     now = datetime.datetime.utcnow()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat() + 'Z'
     end = now.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat() + 'Z'
-    events = service.events().list(
+    return service.events().list(
         calendarId=calendar_id,
         timeMin=start,
         timeMax=end,
         singleEvents=True,
         orderBy='startTime'
     ).execute().get('items', [])
-    return events
+
+def get_urgency(summary):
+    if summary.startswith("🔴"):
+        return "now"
+    elif summary.startswith("🟠"):
+        return "urgent"
+    else:
+        return "standard"
+
+def get_urgency_color(urgency):
+    return {
+        "now": colors.red,
+        "urgent": colors.orange,
+        "standard": colors.green,
+    }.get(urgency, colors.black)
 
 def generate_maps_link(addresses):
-    waypoints = "/".join([addr.replace(" ", "+") for addr in addresses])
-    response = requests.get(f"http://tinyurl.com/api-create.php?url=https://www.google.com/maps/dir/{waypoints}")
-    return response.text if response.status_code == 200 else f"https://www.google.com/maps/dir/{waypoints}"
-
-def get_event_color_and_label(urgency):
-    urgency = urgency.lower()
-    if "pilna" in urgency or "urgent" in urgency:
-        return colors.orange, "Pilna wizyta"
-    elif "natychmiastowa" in urgency or "now" in urgency:
-        return colors.red, "Wizyta natychmiastowa"
-    return colors.green, "Standardowa wizyta"
+    full_link = "https://www.google.com/maps/dir/" + "/".join(addr.replace(" ", "+") for addr in addresses)
+    try:
+        res = requests.get(f"http://tinyurl.com/api-create.php?url={full_link}", timeout=5)
+        return res.text.strip()
+    except:
+        return full_link
 
 def generate_pdf(events, filepath):
-    pdfmetrics.registerFont(TTFont("DejaVuSans", FONT_PATH))
     c = canvas.Canvas(filepath, pagesize=A4)
+    c.setFont("DejaVuSans", 12)
     width, height = A4
     y = height - 50
 
@@ -90,45 +97,36 @@ def generate_pdf(events, filepath):
 
     for event in events:
         summary = event.get("summary", "")
-        location = event.get("location", "")
-        start = event.get("start", {}).get("dateTime", "")
-        start_time = start[11:16] if start else "??:??"
+        location = event.get("location", "BRAK ADRESU")
+        phone = event.get("description", "").split("📞")[-1].splitlines()[0].strip() if "📞" in event.get("description", "") else "BRAK TELEFONU"
+        start_time = event.get("start", {}).get("dateTime", "")[11:16]
 
-        phone = "Brak telefonu"
-        address = location if location else "Brak adresu"
-        urgency = summary.split(" ")[0].strip("🔴🟠🟢")
-        color, urgency_label = get_event_color_and_label(urgency)
+        urgency = get_urgency(summary)
+        urgency_color = get_urgency_color(urgency)
 
-        # Etykieta pilności
-        c.setFillColor(color)
+        # Typ wizyty
+        c.setFillColor(urgency_color)
         c.setFont("DejaVuSans", 12)
-        c.drawString(50, y, urgency_label)
-        y -= 6
-        c.setFillColor(color)
-        c.rect(50, y, 500, 3, fill=1, stroke=0)
-        y -= 14
+        c.drawString(50, y, f"Typ wizyty: {urgency.upper()}")
+        y -= 10
 
-        # Zgłoszenie
+        # Belka pozioma
+        c.setFillColor(urgency_color)
+        c.rect(50, y, width - 100, 5, fill=True, stroke=False)
+        y -= 20
+
+        # Dane
+        c.setFont("DejaVuSans", 12)
         c.setFillColor(colors.black)
-        c.setFont("DejaVuSans", 12)
         c.drawString(50, y, f"{start_time} – {summary}")
         y -= 20
 
         c.setFont("DejaVuSans", 10)
-        if "Brak adresu" in address:
-            c.setFillColor(colors.red)
-        c.drawString(60, y, f"📍 {address}")
-        c.setFillColor(colors.black)
+        c.setFillColor(colors.red if "BRAK" in location.upper() else colors.black)
+        c.drawString(60, y, f"📍 {location}")
         y -= 15
-
-        description = event.get("description", "")
-        for line in description.splitlines():
-            if "Telefon:" in line:
-                phone = line.split("Telefon:")[1].strip()
-        if "Brak" in phone:
-            c.setFillColor(colors.red)
+        c.setFillColor(colors.red if "BRAK" in phone.upper() else colors.black)
         c.drawString(60, y, f"📞 {phone}")
-        c.setFillColor(colors.black)
         y -= 30
 
         if y < 100:
@@ -139,7 +137,7 @@ def generate_pdf(events, filepath):
 
 def send_sms_to_employees(message):
     phones = [EMPLOYEE_1, EMPLOYEE_2]
-    status = []
+    results = []
     for phone in phones:
         payload = {
             "sender": SENDER,
@@ -151,9 +149,12 @@ def send_sms_to_employees(message):
             "App-Key": APP_KEY,
             "Content-Type": "application/json"
         }
-        response = requests.post(JUSTSEND_URL, json=payload, headers=headers)
-        status.append(f"{phone}: {response.status_code}")
-    return ", ".join(status)
+        try:
+            r = requests.post("https://justsend.io/api/sender/singlemessage/send", json=payload, headers=headers)
+            results.append(f"{phone}: {r.status_code}")
+        except:
+            results.append(f"{phone}: ERR")
+    return ", ".join(results)
 
 def send_email_with_pdf(recipient, pdf_path, maps_link, sms_status):
     msg = EmailMessage()
@@ -169,9 +170,8 @@ Status wysyłki SMS:
 """)
 
     with open(pdf_path, 'rb') as f:
-        file_data = f.read()
-        filename = f"plan_dnia_{datetime.datetime.now().strftime('%Y-%m-%d')}.pdf"
-        msg.add_attachment(file_data, maintype='application', subtype='pdf', filename=filename)
+        msg.add_attachment(f.read(), maintype='application', subtype='pdf',
+                           filename=f"plan_dnia_{datetime.datetime.now().date()}.pdf")
 
     with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
         smtp.starttls()
@@ -187,24 +187,25 @@ def generate_route():
 
         addresses = [BASE_ADDRESS]
         for event in events:
-            location = event.get("location")
-            if location:
-                addresses.append(location)
+            loc = event.get("location")
+            if loc:
+                addresses.append(loc)
         addresses.append(BASE_ADDRESS)
 
         maps_link = generate_maps_link(addresses)
+
         pdf_path = "/tmp/plan_dnia.pdf"
         generate_pdf(events, pdf_path)
 
-        sms_content = "🛠️ Plan dnia ENERTIA:\n"
+        sms_body = "🛠️ Plan dnia ENERTIA:\n"
         for e in events:
             summary = e.get("summary", "")
-            location = e.get("location", "")
+            loc = e.get("location", "Brak")
             time = e.get("start", {}).get("dateTime", "")[11:16]
-            sms_content += f"{time} – {summary} ({location})\n"
-        sms_content += f"📍 Trasa: {maps_link}"
+            sms_body += f"{time} – {summary} ({loc})\n"
+        sms_body += f"📍 Trasa: {maps_link}"
 
-        sms_status = send_sms_to_employees(sms_content)
+        sms_status = send_sms_to_employees(sms_body)
         send_email_with_pdf(EMAIL_RECEIVER, pdf_path, maps_link, sms_status)
 
         return jsonify({"status": "Wysłano SMS i e-mail", "maps_link": maps_link})
